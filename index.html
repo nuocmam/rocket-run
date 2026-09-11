@@ -14,10 +14,27 @@
       display: flex; flex-direction: column; justify-content: space-between;
       padding: 16px 18px; color: #eaf2ff;
     }
-    .top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .top, .bottom { display: flex; justify-content: space-between; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+    .top { align-items: flex-start; }
     .pill {
       background: rgba(10, 18, 40, 0.72); border: 1px solid rgba(140, 180, 255, 0.25);
       backdrop-filter: blur(8px); border-radius: 999px; padding: 8px 14px; font-weight: 650; letter-spacing: 0.02em;
+    }
+    .meter {
+      width: min(220px, 46vw); height: 12px; border-radius: 999px;
+      background: rgba(255,255,255,0.12); border: 1px solid rgba(140,180,255,0.25); overflow: hidden;
+    }
+    .meter > i { display:block; height:100%; width:100%; transform-origin: left center;
+      background: linear-gradient(90deg, #4fd1ff, #7cf29a); transform: scaleX(1); }
+    .meter.boosting > i { background: linear-gradient(90deg, #ff8a3d, #ff5a4e); }
+    #floatScores { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+    .floater {
+      position: absolute; color: #ffd24a; font-weight: 800; font-size: 1.1rem;
+      text-shadow: 0 2px 10px rgba(0,0,0,0.6); animation: rise 700ms ease-out forwards;
+    }
+    @keyframes rise {
+      from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+      to { opacity: 0; transform: translate(-50%, -120%) scale(1.25); }
     }
     #overlay {
       position: fixed; inset: 0; display: grid; place-items: center;
@@ -26,34 +43,51 @@
     }
     #overlay.hidden { display: none; }
     #overlay h1 { font-size: clamp(2rem, 6vw, 3.4rem); margin-bottom: 8px; }
-    #overlay p { opacity: 0.88; max-width: 28rem; margin: 0 auto 18px; line-height: 1.45; }
-    #overlay button {
+    #overlay p { opacity: 0.88; max-width: 30rem; margin: 0 auto 14px; line-height: 1.45; }
+    #overlay button, #muteBtn {
       pointer-events: auto; cursor: pointer; border: 0; border-radius: 999px;
       padding: 12px 22px; font-size: 1rem; font-weight: 700;
+    }
+    #overlay button {
       background: linear-gradient(135deg, #ff5a4e, #ff8a3d); color: #140808;
       box-shadow: 0 10px 30px rgba(255, 90, 78, 0.35);
     }
+    #muteBtn {
+      padding: 8px 12px; background: rgba(10,18,40,0.72); color: #eaf2ff;
+      border: 1px solid rgba(140,180,255,0.25);
+    }
     .hint { font-size: 0.92rem; opacity: 0.8; }
+    @media (prefers-reduced-motion: reduce) {
+      .floater { animation: none; opacity: 0; }
+    }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
+  <div id="floatScores"></div>
   <div id="hud">
     <div class="top">
       <div class="pill">Score: <span id="score">0</span></div>
+      <div class="pill">Combo ×<span id="combo">1</span></div>
       <div class="pill">Best: <span id="best">0</span></div>
     </div>
-    <div class="hint">← → ↑ ↓ / WASD to fly · grab gold coins · Space to boost</div>
+    <div class="bottom">
+      <div>
+        <div class="hint" style="margin-bottom:6px">Boost</div>
+        <div class="meter" id="boostMeter"><i id="boostFill"></i></div>
+      </div>
+      <button id="muteBtn" type="button" aria-label="Mute">Sound on</button>
+      <div class="hint">← → ↑ ↓ / WASD · Space boost · coins + near misses</div>
+    </div>
   </div>
   <div id="overlay">
     <div>
       <h1>Rocket Run</h1>
-      <p>Fly in 3D (left/right/up/down), dodge asteroids, grab gold coins (+25).</p>
+      <p>Fly in 3D, grab gold coins for combos, skim asteroids for near-miss bonuses, and manage your boost.</p>
       <button id="startBtn">Launch</button>
       <p id="endMsg" class="hint" style="margin-top:14px"></p>
     </div>
   </div>
-
   <script type="importmap">
   {
     "imports": {
