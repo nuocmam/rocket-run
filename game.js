@@ -5,9 +5,10 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 const CFG = {
   laneHalf: 4.2,
   laneHeight: 2.8,
-  baseSpeed: 14,
-  speedRamp: 0.42,
-  speedCap: 34,
+  BASE_SPEED: 14,
+  MAX_BASE_SPEED: 34,
+  RAMP_SECONDS: 120,
+  ZONE_DISTANCE: 1500,
   boostExtra: 10,
   steerAccel: 18,
   steerMax: 9,
@@ -22,6 +23,67 @@ const CFG = {
   boostCooldown: 0.35,
   magnetRange: 2.6,
   magnetZ: [-14, 5],
+  HISTORY_LIMIT: 5,
+  RESTART_GUARD_MS: 250,
+  TRAIL_COUNT_MIN: 5,
+  TRAIL_COUNT_MAX: 8,
+  TRAIL_GAP_Z: 2.4,
+  TRAIL_ARC_X: 1.6,
+  TRAIL_ARC_Y: 0.9,
+  TRAIL_INTERVAL: 9,
+  TRAIL_EDGE_MARGIN: 0.75,
+  COMBO_WARN_FRACTION: 0.25,
+  SCORE_POPUP_MS: 650,
+  MAX_SCORE_POPUPS: 12,
+  MISSIONS: [
+    { id: 'survive', target: 30, label: 'Survive 30s' },
+    { id: 'nearMiss', target: 5, label: '5 near-misses' },
+    { id: 'combo', target: 4, label: 'Combo ×4' },
+  ],
+  SECTOR_BLEND_SECONDS: 2,
+  SECTORS: [
+    {
+      name: 'Blue Nebula',
+      bg: 0x050814,
+      fog: 0x050814,
+      keyIntensity: 1.4,
+      rimColor: 0xff7a4d,
+      coinWeight: 0.55,
+      asteroidWeight: 0.45,
+    },
+    {
+      name: 'Amber Drift',
+      bg: 0x12080a,
+      fog: 0x1a0c0e,
+      keyIntensity: 1.25,
+      rimColor: 0xffaa55,
+      coinWeight: 0.45,
+      asteroidWeight: 0.55,
+    },
+    {
+      name: 'Violet Reach',
+      bg: 0x0a0618,
+      fog: 0x140a28,
+      keyIntensity: 1.15,
+      rimColor: 0xb48cff,
+      coinWeight: 0.6,
+      asteroidWeight: 0.4,
+    },
+    {
+      name: 'Emerald Belt',
+      bg: 0x041210,
+      fog: 0x062018,
+      keyIntensity: 1.3,
+      rimColor: 0x4dffb0,
+      coinWeight: 0.5,
+      asteroidWeight: 0.5,
+    },
+  ],
+  MAGNET_PICKUP_INTERVAL: 25,
+  MAGNET_DURATION: 6,
+  MAGNET_RADIUS_MULTIPLIER: 1.8,
+  TOUCH_DEADZONE_PX: 8,
+  TOUCH_DRAG_RANGE_PX: 90,
 };
 
 const canvas = document.getElementById('c');
@@ -35,16 +97,76 @@ const boostFill = document.getElementById('boostFill');
 const boostMeter = document.getElementById('boostMeter');
 const muteBtn = document.getElementById('muteBtn');
 const floatScores = document.getElementById('floatScores');
+const scorePopups = document.getElementById('score-popups') || floatScores;
+const comboTimeFill = document.getElementById('combo-time-fill');
+const comboMeter = document.getElementById('comboMeter');
+const distanceValueEl = document.getElementById('distance-value');
+const zoneValueEl = document.getElementById('zone-value');
+const magnetEffectEl = document.getElementById('magnet-effect');
+const magnetSecsEl = document.getElementById('magnet-secs');
+const endPanel = document.getElementById('end-panel');
+const resultSurvival = document.getElementById('result-survival');
+const resultCoins = document.getElementById('result-coins');
+const resultNearMisses = document.getElementById('result-near-misses');
+const resultTotal = document.getElementById('result-total');
+const bestDeltaEl = document.getElementById('best-delta');
+const finalBestEl = document.getElementById('final-best');
+const completedRunsEl = document.getElementById('completed-runs');
+const recentScoresEl = document.getElementById('recent-scores');
+const introCopy = document.getElementById('introCopy');
+const touchBoostBtn = document.getElementById('touch-boost');
+const missionEls = {
+  survive: document.getElementById('mission-survive'),
+  nearMiss: document.getElementById('mission-nearMiss'),
+  combo: document.getElementById('mission-combo'),
+};
 
 const BEST_KEY = 'rocket-run-best';
 const MUTE_KEY = 'rocket-run-mute';
+const STATS_KEY = 'rocketRun.stats.v1';
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const coarsePointer = matchMedia('(pointer: coarse)').matches;
 
 function lsGet(k, d) {
-  try { const v = localStorage.getItem(k); return v == null ? d : v; } catch { return d; }
+  try {
+    const v = localStorage.getItem(k);
+    return v == null ? d : v;
+  } catch {
+    return d;
+  }
 }
 function lsSet(k, v) {
-  try { localStorage.setItem(k, v); } catch {}
+  try {
+    localStorage.setItem(k, v);
+  } catch {}
+}
+
+function loadStats() {
+  const fallback = { version: 1, completedRuns: 0, recentScores: [] };
+  try {
+    const raw = lsGet(STATS_KEY, '');
+    if (!raw) return { ...fallback, recentScores: [] };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return { ...fallback, recentScores: [] };
+    const completedRuns = Math.max(0, Number(parsed.completedRuns) || 0);
+    const recentScores = Array.isArray(parsed.recentScores)
+      ? parsed.recentScores.map((n) => Math.max(0, Math.floor(Number(n) || 0))).slice(0, CFG.HISTORY_LIMIT)
+      : [];
+    return { version: 1, completedRuns, recentScores };
+  } catch {
+    return { ...fallback, recentScores: [] };
+  }
+}
+
+function saveStats(stats) {
+  lsSet(
+    STATS_KEY,
+    JSON.stringify({
+      version: 1,
+      completedRuns: stats.completedRuns,
+      recentScores: stats.recentScores.slice(0, CFG.HISTORY_LIMIT),
+    }),
+  );
 }
 
 bestEl.textContent = String(Number(lsGet(BEST_KEY, '0')));
@@ -88,28 +210,68 @@ scene.add(rim);
 const rocketGroup = new THREE.Group();
 scene.add(rocketGroup);
 
+/** @type {THREE.Object3D | null} */
 let rocket = null;
-let playing = false;
-let score = 0;
-let coinScore = 0;
-let nearMissScore = 0;
-let speed = CFG.baseSpeed;
+
+const state = {
+  phase: 'ready', // ready | playing | gameover
+  runId: 0,
+  elapsed: 0,
+  distance: 0,
+  zone: 1,
+  baseSpeed: CFG.BASE_SPEED,
+  effectiveSpeed: CFG.BASE_SPEED,
+  scoreParts: { survival: 0, coins: 0, nearMisses: 0 },
+  survivalAcc: 0,
+  combo: 1,
+  comboTimer: 0,
+  boosting: false,
+  boostFuel: CFG.boostMax,
+  boostCooldown: 0,
+  magnetBoostRemaining: 0,
+  nearMissCount: 0,
+  maxCombo: 1,
+  bestBeforeRun: 0,
+  ended: false,
+  sectorIndex: 0,
+  sectorBlend: 1,
+  trailCorridor: null, // { cx, cy, halfX, halfY, zMin, zMax } or null
+  trailSpawnTimer: 0,
+  magnetPickupTimer: 0,
+  missions: {
+    survive: { progress: 0, done: false },
+    nearMiss: { progress: 0, done: false },
+    combo: { progress: 0, done: false },
+  },
+  stats: loadStats(),
+};
+
 let velX = 0;
 let velY = 0;
 let steer = 0;
 let steerY = 0;
-let boosting = false;
-let boostFuel = CFG.boostMax;
-let boostCooldown = 0;
-let timeAlive = 0;
-let combo = 1;
-let comboTimer = 0;
 let shake = 0;
 const keys = new Set();
 const obstacles = [];
-const pickups = [];
-const floaters = [];
+const pickups = []; // coins + magnet pickups
 const clock = new THREE.Clock();
+let animStarted = false;
+let lastRestartAt = 0;
+let touchBoostHeld = false;
+
+// pointer steering
+const pointerSteer = {
+  id: null,
+  originX: 0,
+  originY: 0,
+  nx: 0,
+  ny: 0,
+};
+
+const bgColor = scene.background;
+const fogColor = scene.fog.color;
+const sectorFrom = { bg: new THREE.Color(0x050814), fog: new THREE.Color(0x050814), key: 1.4, rim: new THREE.Color(0xff7a4d) };
+const sectorTo = { bg: new THREE.Color(0x050814), fog: new THREE.Color(0x050814), key: 1.4, rim: new THREE.Color(0xff7a4d) };
 
 // audio
 let audioCtx = null;
@@ -128,8 +290,10 @@ function beep(freq, dur = 0.08, type = 'square', gain = 0.04) {
   o.frequency.value = freq;
   g.gain.setValueAtTime(gain, t0);
   g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-  o.connect(g); g.connect(audioCtx.destination);
-  o.start(t0); o.stop(t0 + dur);
+  o.connect(g);
+  g.connect(audioCtx.destination);
+  o.start(t0);
+  o.stop(t0 + dur);
 }
 
 muteBtn.addEventListener('click', () => {
@@ -139,19 +303,71 @@ muteBtn.addEventListener('click', () => {
   if (!muted) ensureAudio();
 });
 
+function totalScore() {
+  return (
+    Math.floor(state.scoreParts.survival) +
+    Math.floor(state.scoreParts.coins) +
+    Math.floor(state.scoreParts.nearMisses)
+  );
+}
+
+function awardScore(source, amount, opts = {}) {
+  const n = Math.max(0, Number(amount) || 0);
+  if (n <= 0) return 0;
+  if (source === 'survival') {
+    state.scoreParts.survival += n;
+  } else if (source === 'coins') {
+    state.scoreParts.coins += n;
+  } else if (source === 'nearMisses') {
+    state.scoreParts.nearMisses += n;
+  } else {
+    return 0;
+  }
+  const shown = Math.floor(n);
+  if (shown > 0 && source !== 'survival') {
+    const mult = opts.multiplier && opts.multiplier > 1 ? opts.multiplier : 0;
+    floatScore(shown, opts.color || (source === 'nearMisses' ? '#9ecbff' : '#ffd24a'), mult);
+  }
+  return n;
+}
+
+function floatScore(pts, color = '#ffd24a', multiplier = 0) {
+  if (reducedMotion) return;
+  const host = scorePopups || floatScores;
+  while (host.childElementCount >= CFG.MAX_SCORE_POPUPS) {
+    host.firstElementChild?.remove();
+  }
+  const el = document.createElement('div');
+  el.className = 'floater';
+  el.textContent = multiplier > 1 ? `+${pts} (×${multiplier})` : `+${pts}`;
+  el.style.color = color;
+  el.style.left = `${48 + Math.random() * 4}%`;
+  el.style.top = `${40 + Math.random() * 6}%`;
+  host.appendChild(el);
+  setTimeout(() => el.remove(), CFG.SCORE_POPUP_MS);
+}
+
+function clearFloaters() {
+  floatScores.replaceChildren();
+  if (scorePopups && scorePopups !== floatScores) scorePopups.replaceChildren();
+}
+
 function makeAsteroid() {
   const r = 0.55 + Math.random() * 0.55;
   const mesh = new THREE.Mesh(
     new THREE.IcosahedronGeometry(r, 0),
     new THREE.MeshStandardMaterial({
       color: new THREE.Color().setHSL(0.05 + Math.random() * 0.08, 0.25, 0.35 + Math.random() * 0.2),
-      roughness: 0.9, metalness: 0.1, flatShading: true,
+      roughness: 0.9,
+      metalness: 0.1,
+      flatShading: true,
     }),
   );
   mesh.userData.spin = new THREE.Vector3((Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2);
   mesh.userData.radius = r;
   mesh.userData.awardedNearMiss = false;
   mesh.userData.prevSide = 0;
+  mesh.userData.isAsteroid = true;
   return mesh;
 }
 
@@ -159,78 +375,300 @@ function makeCoin() {
   const mesh = new THREE.Mesh(
     new THREE.CylinderGeometry(0.38, 0.38, 0.1, 24),
     new THREE.MeshStandardMaterial({
-      color: 0xffd24a, emissive: 0xff9a1a, emissiveIntensity: 0.85, metalness: 0.75, roughness: 0.25,
+      color: 0xffd24a,
+      emissive: 0xff9a1a,
+      emissiveIntensity: 0.85,
+      metalness: 0.75,
+      roughness: 0.25,
     }),
   );
   mesh.rotation.x = Math.PI / 2;
   mesh.userData.isCoin = true;
+  mesh.userData.collected = false;
   return mesh;
 }
 
-function floatScore(pts, color = '#ffd24a') {
-  if (reducedMotion) return;
-  const el = document.createElement('div');
-  el.className = 'floater';
-  el.textContent = `+${pts}`;
-  el.style.color = color;
-  el.style.left = '50%';
-  el.style.top = '42%';
-  floatScores.appendChild(el);
-  setTimeout(() => el.remove(), 750);
+function makeMagnetPickup() {
+  const group = new THREE.Group();
+  const torus = new THREE.Mesh(
+    new THREE.TorusGeometry(0.42, 0.12, 10, 24),
+    new THREE.MeshStandardMaterial({
+      color: 0x4fd1ff,
+      emissive: 0x1a6cff,
+      emissiveIntensity: 0.9,
+      metalness: 0.6,
+      roughness: 0.3,
+    }),
+  );
+  const core = new THREE.Mesh(
+    new THREE.SphereGeometry(0.18, 12, 12),
+    new THREE.MeshStandardMaterial({
+      color: 0xb8ecff,
+      emissive: 0x4fd1ff,
+      emissiveIntensity: 1.1,
+      metalness: 0.4,
+      roughness: 0.2,
+    }),
+  );
+  group.add(torus);
+  group.add(core);
+  group.userData.isMagnetPickup = true;
+  group.userData.collected = false;
+  group.userData.radius = 0.55;
+  return group;
+}
+
+function currentSector() {
+  return CFG.SECTORS[(state.zone - 1) % CFG.SECTORS.length];
+}
+
+function beginSectorBlend(nextIndex) {
+  sectorFrom.bg.copy(bgColor);
+  sectorFrom.fog.copy(fogColor);
+  sectorFrom.key = key.intensity;
+  sectorFrom.rim.copy(rim.color);
+  const s = CFG.SECTORS[nextIndex % CFG.SECTORS.length];
+  sectorTo.bg.setHex(s.bg);
+  sectorTo.fog.setHex(s.fog);
+  sectorTo.key = s.keyIntensity;
+  sectorTo.rim.setHex(s.rimColor);
+  state.sectorIndex = nextIndex % CFG.SECTORS.length;
+  state.sectorBlend = 0;
+}
+
+function updateSectorVisuals(dt) {
+  if (state.sectorBlend < 1) {
+    state.sectorBlend = Math.min(1, state.sectorBlend + dt / CFG.SECTOR_BLEND_SECONDS);
+    const t = state.sectorBlend;
+    const smooth = t * t * (3 - 2 * t);
+    bgColor.copy(sectorFrom.bg).lerp(sectorTo.bg, smooth);
+    fogColor.copy(sectorFrom.fog).lerp(sectorTo.fog, smooth);
+    key.intensity = THREE.MathUtils.lerp(sectorFrom.key, sectorTo.key, smooth);
+    rim.color.copy(sectorFrom.rim).lerp(sectorTo.rim, smooth);
+  }
+}
+
+function effectiveMagnetRange() {
+  return state.magnetBoostRemaining > 0
+    ? CFG.magnetRange * CFG.MAGNET_RADIUS_MULTIPLIER
+    : CFG.magnetRange;
 }
 
 function updateHud() {
-  scoreEl.textContent = String(score);
-  comboEl.textContent = String(combo);
-  boostFill.style.transform = `scaleX(${THREE.MathUtils.clamp(boostFuel, 0, 1)})`;
-  boostMeter.classList.toggle('boosting', boosting);
+  scoreEl.textContent = String(totalScore());
+  comboEl.textContent = String(state.combo);
+  boostFill.style.transform = `scaleX(${THREE.MathUtils.clamp(state.boostFuel, 0, 1)})`;
+  boostMeter.classList.toggle('boosting', state.boosting);
+
+  const comboFrac = state.combo > 1 && state.comboTimer > 0
+    ? THREE.MathUtils.clamp(state.comboTimer / CFG.comboWindow, 0, 1)
+    : 0;
+  if (comboTimeFill) comboTimeFill.style.transform = `scaleX(${comboFrac})`;
+  if (comboMeter) {
+    const warn = comboFrac > 0 && comboFrac <= CFG.COMBO_WARN_FRACTION;
+    comboMeter.classList.toggle('warn', warn && !reducedMotion);
+  }
+
+  if (distanceValueEl) distanceValueEl.textContent = String(Math.floor(state.distance));
+  const sector = currentSector();
+  if (zoneValueEl) zoneValueEl.textContent = `${state.zone} · ${sector.name}`;
+
+  if (magnetEffectEl) {
+    const active = state.magnetBoostRemaining > 0;
+    magnetEffectEl.classList.toggle('active', active);
+    if (magnetSecsEl) magnetSecsEl.textContent = String(Math.ceil(state.magnetBoostRemaining));
+  }
+
+  updateMissionHud();
+}
+
+function updateMissionHud() {
+  for (const m of CFG.MISSIONS) {
+    const el = missionEls[m.id];
+    const st = state.missions[m.id];
+    if (!el || !st) continue;
+    el.classList.toggle('done', st.done);
+    if (m.id === 'survive') {
+      el.textContent = st.done ? 'Survive 30s' : `Survive ${Math.min(m.target, Math.floor(st.progress))}s / ${m.target}s`;
+    } else if (m.id === 'nearMiss') {
+      el.textContent = st.done ? '5 near-misses' : `Near-miss ${Math.min(m.target, st.progress)} / ${m.target}`;
+    } else if (m.id === 'combo') {
+      el.textContent = st.done ? 'Combo ×4' : `Combo ×${Math.min(m.target, st.progress)} / ×${m.target}`;
+    }
+  }
+}
+
+function latchMissions() {
+  const survive = state.missions.survive;
+  survive.progress = state.elapsed;
+  if (!survive.done && survive.progress >= 30) survive.done = true;
+
+  const nm = state.missions.nearMiss;
+  nm.progress = state.nearMissCount;
+  if (!nm.done && nm.progress >= 5) nm.done = true;
+
+  const cb = state.missions.combo;
+  cb.progress = state.maxCombo;
+  if (!cb.done && cb.progress >= 4) cb.done = true;
 }
 
 function clearEntities() {
   for (const o of obstacles.splice(0)) scene.remove(o);
   for (const p of pickups.splice(0)) scene.remove(p);
+  state.trailCorridor = null;
+}
+
+function positionAvoidsTrail(x, y, z, margin = 1.1) {
+  const c = state.trailCorridor;
+  if (!c) return true;
+  if (z < c.zMin - 2 || z > c.zMax + 2) return true;
+  const dx = Math.abs(x - c.cx);
+  const dy = Math.abs(y - c.cy);
+  return dx > c.halfX + margin || dy > c.halfY + margin;
 }
 
 function spawnObstacle(z = -70) {
   const a = makeAsteroid();
-  // leave navigable gaps: bias away from packing center occasionally
-  a.position.set(
-    (Math.random() * 2 - 1) * CFG.laneHalf,
-    (Math.random() * 2 - 1) * CFG.laneHeight * 0.7,
-    z,
-  );
+  let x = (Math.random() * 2 - 1) * CFG.laneHalf;
+  let y = (Math.random() * 2 - 1) * CFG.laneHeight * 0.7;
+  // lightly avoid trail corridor
+  for (let attempt = 0; attempt < 6; attempt++) {
+    if (positionAvoidsTrail(x, y, z, 0.9)) break;
+    x = (Math.random() * 2 - 1) * CFG.laneHalf;
+    y = (Math.random() * 2 - 1) * CFG.laneHeight * 0.7;
+  }
+  a.position.set(x, y, z);
   scene.add(a);
   obstacles.push(a);
 }
 
-function spawnPickup(z = -70, trail = false, i = 0) {
+function spawnCoinAt(x, y, z) {
   const s = makeCoin();
-  if (trail) {
-    const t = i / 4;
-    s.position.set(
-      Math.sin(t * Math.PI * 2) * (CFG.laneHalf * 0.55),
-      Math.cos(t * Math.PI) * (CFG.laneHeight * 0.35),
-      z - i * 2.2,
-    );
-  } else {
-    s.position.set(
-      (Math.random() * 2 - 1) * (CFG.laneHalf - 0.6),
-      (Math.random() * 2 - 1) * CFG.laneHeight * 0.55,
-      z,
-    );
-  }
+  s.position.set(x, y, z);
   scene.add(s);
   pickups.push(s);
+  return s;
+}
+
+function spawnCoinScatter(z = -70) {
+  const x = (Math.random() * 2 - 1) * (CFG.laneHalf - CFG.TRAIL_EDGE_MARGIN);
+  const y = (Math.random() * 2 - 1) * CFG.laneHeight * 0.55;
+  spawnCoinAt(x, y, z);
+}
+
+function spawnCoinTrail(zStart = -70) {
+  const count = CFG.TRAIL_COUNT_MIN + Math.floor(Math.random() * (CFG.TRAIL_COUNT_MAX - CFG.TRAIL_COUNT_MIN + 1));
+  const margin = CFG.TRAIL_EDGE_MARGIN;
+  const maxX = CFG.laneHalf - margin - CFG.TRAIL_ARC_X;
+  const maxY = CFG.laneHeight * 0.55 - CFG.TRAIL_ARC_Y;
+  const cx = (Math.random() * 2 - 1) * Math.max(0.2, maxX);
+  const cy = (Math.random() * 2 - 1) * Math.max(0.2, maxY);
+  const phase = Math.random() * Math.PI * 2;
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const gap = CFG.TRAIL_GAP_Z;
+
+  // constrain lateral step at max boosted speed
+  const maxBoostSpeed = CFG.MAX_BASE_SPEED + CFG.boostExtra;
+  const travelTime = gap / maxBoostSpeed;
+  const maxLateral = CFG.steerMax * travelTime * 0.95;
+  const arcX = Math.min(CFG.TRAIL_ARC_X, maxLateral);
+  const arcY = Math.min(CFG.TRAIL_ARC_Y, maxLateral);
+
+  let zMin = Infinity;
+  let zMax = -Infinity;
+  for (let i = 0; i < count; i++) {
+    const t = i / Math.max(1, count - 1);
+    const x = cx + Math.sin(phase + t * Math.PI * 2 * dir) * arcX;
+    const y = cy + Math.cos(phase + t * Math.PI * dir) * arcY;
+    const z = zStart - i * gap;
+    const clampedX = THREE.MathUtils.clamp(x, -(CFG.laneHalf - margin), CFG.laneHalf - margin);
+    const clampedY = THREE.MathUtils.clamp(y, -CFG.laneHeight * 0.7, CFG.laneHeight * 0.7);
+    spawnCoinAt(clampedX, clampedY, z);
+    zMin = Math.min(zMin, z);
+    zMax = Math.max(zMax, z);
+  }
+
+  state.trailCorridor = {
+    cx,
+    cy,
+    halfX: arcX + 0.5,
+    halfY: arcY + 0.45,
+    zMin,
+    zMax,
+  };
+}
+
+function countWorldMagnetPickups() {
+  let n = 0;
+  for (const p of pickups) if (p.userData.isMagnetPickup && !p.userData.collected) n++;
+  return n;
+}
+
+function spawnMagnetPickup(z = -75) {
+  if (countWorldMagnetPickups() >= 1) return;
+  const m = makeMagnetPickup();
+  let x = (Math.random() * 2 - 1) * (CFG.laneHalf - 1);
+  let y = (Math.random() * 2 - 1) * CFG.laneHeight * 0.5;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if (positionAvoidsTrail(x, y, z, 1.2)) break;
+    x = (Math.random() * 2 - 1) * (CFG.laneHalf - 1);
+    y = (Math.random() * 2 - 1) * CFG.laneHeight * 0.5;
+  }
+  m.position.set(x, y, z);
+  scene.add(m);
+  pickups.push(m);
+}
+
+function resetMissions() {
+  state.missions = {
+    survive: { progress: 0, done: false },
+    nearMiss: { progress: 0, done: false },
+    combo: { progress: 0, done: false },
+  };
 }
 
 function resetWorld() {
   clearEntities();
-  score = 0; coinScore = 0; nearMissScore = 0;
-  speed = CFG.baseSpeed;
-  velX = 0; velY = 0; steer = 0; steerY = 0;
-  boosting = false; boostFuel = CFG.boostMax; boostCooldown = 0;
-  timeAlive = 0; combo = 1; comboTimer = 0; shake = 0;
-  camera.fov = camBase.fov; camera.updateProjectionMatrix();
+  clearFloaters();
+  state.elapsed = 0;
+  state.distance = 0;
+  state.zone = 1;
+  state.baseSpeed = CFG.BASE_SPEED;
+  state.effectiveSpeed = CFG.BASE_SPEED;
+  state.scoreParts = { survival: 0, coins: 0, nearMisses: 0 };
+  state.survivalAcc = 0;
+  state.combo = 1;
+  state.comboTimer = 0;
+  state.boosting = false;
+  state.boostFuel = CFG.boostMax;
+  state.boostCooldown = 0;
+  state.magnetBoostRemaining = 0;
+  state.nearMissCount = 0;
+  state.maxCombo = 1;
+  state.ended = false;
+  state.trailSpawnTimer = 0;
+  state.magnetPickupTimer = CFG.MAGNET_PICKUP_INTERVAL * 0.4;
+  resetMissions();
+  velX = 0;
+  velY = 0;
+  steer = 0;
+  steerY = 0;
+  shake = 0;
+  pointerSteer.id = null;
+  pointerSteer.nx = 0;
+  pointerSteer.ny = 0;
+  touchBoostHeld = false;
+  if (touchBoostBtn) touchBoostBtn.classList.remove('active');
+
+  beginSectorBlend(0);
+  state.sectorBlend = 1;
+  bgColor.setHex(CFG.SECTORS[0].bg);
+  fogColor.setHex(CFG.SECTORS[0].fog);
+  key.intensity = CFG.SECTORS[0].keyIntensity;
+  rim.color.setHex(CFG.SECTORS[0].rimColor);
+
+  camera.fov = camBase.fov;
+  camera.updateProjectionMatrix();
   camera.position.set(camBase.x, camBase.y, camBase.z);
   if (rocket) {
     if (rocket.userData.basePos) {
@@ -240,9 +678,8 @@ function resetWorld() {
     rocket.rotation.set(rocket.userData.basePitch ?? -Math.PI / 2, 0, 0);
   }
   for (let i = 0; i < 10; i++) spawnObstacle(-18 - i * 9);
-  for (let i = 0; i < 5; i++) spawnPickup(-26 - i * 14);
-  // one early coin trail
-  for (let i = 0; i < 5; i++) spawnPickup(-55, true, i);
+  for (let i = 0; i < 3; i++) spawnCoinScatter(-26 - i * 14);
+  spawnCoinTrail(-55);
   updateHud();
 }
 
@@ -252,71 +689,225 @@ const _closest = new THREE.Vector3();
 const _prevRocket = new THREE.Vector3();
 
 function rocketHits(other, pad = 0.25) {
+  if (!rocket) return false;
   rocket.updateMatrixWorld(true);
   _rocketBox.setFromObject(rocket);
   _rocketBox.expandByScalar(pad);
   other.getWorldPosition(_tmp);
-  // swept check along Z against previous rocket center to avoid boost tunneling
   const curr = _rocketBox.getCenter(new THREE.Vector3());
   const steps = 3;
   for (let s = 0; s <= steps; s++) {
     const t = s / steps;
-    const probe = _tmp.clone();
-    // move probe relatively? instead expand box along motion
     const box = _rocketBox.clone();
     const mid = _prevRocket.clone().lerp(curr, t);
     const delta = mid.clone().sub(curr);
-    box.min.add(delta); box.max.add(delta);
+    box.min.add(delta);
+    box.max.add(delta);
     box.clampPoint(_tmp, _closest);
     if (_closest.distanceTo(_tmp) < 0.001) return true;
   }
   return false;
 }
 
-function gameOver() {
-  if (!playing) return;
-  playing = false;
+function persistRun(final) {
+  state.stats.completedRuns += 1;
+  state.stats.recentScores = [final, ...state.stats.recentScores].slice(0, CFG.HISTORY_LIMIT);
+  saveStats(state.stats);
+}
+
+function finishRun() {
+  if (state.phase !== 'playing' || state.ended) return;
+  state.ended = true;
+  state.phase = 'gameover';
   shake = reducedMotion ? 0 : 0.45;
   beep(90, 0.25, 'sawtooth', 0.05);
-  const best = Math.max(score, Number(lsGet(BEST_KEY, '0')));
-  lsSet(BEST_KEY, String(best));
-  bestEl.textContent = String(best);
-  endMsg.textContent = `Crashed! Score ${score} · Best ${best} · Coins ${coinScore} · Near misses ${nearMissScore}`;
+
+  // finalize survival bucket so categories equal total
+  const survivalFloor = Math.floor(state.survivalAcc);
+  const survivalDelta = survivalFloor - Math.floor(state.scoreParts.survival);
+  if (survivalDelta > 0) state.scoreParts.survival += survivalDelta;
+  // keep fractional part aligned
+  state.scoreParts.survival = survivalFloor;
+
+  const final = totalScore();
+  const prevBest = state.bestBeforeRun;
+  const storedBest = Math.max(final, Number(lsGet(BEST_KEY, '0')));
+  lsSet(BEST_KEY, String(storedBest));
+  bestEl.textContent = String(storedBest);
+
+  persistRun(final);
+
+  if (resultSurvival) resultSurvival.textContent = String(Math.floor(state.scoreParts.survival));
+  if (resultCoins) resultCoins.textContent = String(Math.floor(state.scoreParts.coins));
+  if (resultNearMisses) resultNearMisses.textContent = String(Math.floor(state.scoreParts.nearMisses));
+  if (resultTotal) resultTotal.textContent = String(final);
+
+  if (bestDeltaEl) {
+    if (final > prevBest) bestDeltaEl.textContent = `New best! +${final - prevBest}.`;
+    else if (final === prevBest) bestDeltaEl.textContent = 'Matched your best.';
+    else bestDeltaEl.textContent = `${prevBest - final} short of best.`;
+  }
+  if (finalBestEl) finalBestEl.textContent = `Best: ${storedBest}`;
+  if (completedRunsEl) completedRunsEl.textContent = String(state.stats.completedRuns);
+  if (recentScoresEl) {
+    recentScoresEl.replaceChildren();
+    for (const s of state.stats.recentScores) {
+      const li = document.createElement('li');
+      li.textContent = String(s);
+      recentScoresEl.appendChild(li);
+    }
+  }
+
+  if (endPanel) endPanel.classList.add('visible');
+  if (introCopy) introCopy.style.display = 'none';
+  endMsg.textContent = `Crashed! Score ${final}`;
   overlay.classList.remove('hidden');
   startBtn.textContent = 'Fly again';
+  clearPointerSteer();
+  touchBoostHeld = false;
 }
 
-function startGame() {
+function startRun() {
   ensureAudio();
+  state.runId += 1;
+  state.bestBeforeRun = Number(lsGet(BEST_KEY, '0')) || 0;
   resetWorld();
   if (rocket) rocket.getWorldPosition(_prevRocket);
+  if (endPanel) endPanel.classList.remove('visible');
+  if (introCopy) introCopy.style.display = '';
+  endMsg.textContent = '';
   overlay.classList.add('hidden');
-  playing = true;
+  state.phase = 'playing';
+  state.ended = false;
   clock.start();
   beep(440, 0.06, 'triangle', 0.03);
+  updateHud();
 }
 
-startBtn.addEventListener('click', startGame);
+function requestRestart() {
+  if (state.phase !== 'gameover' && state.phase !== 'ready') return;
+  const now = performance.now();
+  if (now - lastRestartAt < CFG.RESTART_GUARD_MS) return;
+  lastRestartAt = now;
+  startRun();
+}
+
+startBtn.addEventListener('click', (e) => {
+  e.preventDefault();
+  requestRestart();
+});
 
 addEventListener('keydown', (e) => {
+  if (e.repeat) {
+    // still track held keys for steering, but ignore restart repeats
+    keys.add(e.code);
+    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+    return;
+  }
   keys.add(e.code);
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
-  if (!playing && (e.code === 'Enter' || e.code === 'Space')) startGame();
+  if ((state.phase === 'gameover' || state.phase === 'ready') && (e.code === 'Enter' || e.code === 'Space')) {
+    e.preventDefault();
+    requestRestart();
+  }
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
-addEventListener('blur', () => keys.clear());
 
-let pointerX = null, pointerY = null;
+function clearPointerSteer() {
+  pointerSteer.id = null;
+  pointerSteer.nx = 0;
+  pointerSteer.ny = 0;
+  steer = 0;
+  steerY = 0;
+}
+
+function clearInputs() {
+  keys.clear();
+  clearPointerSteer();
+  touchBoostHeld = false;
+  if (touchBoostBtn) touchBoostBtn.classList.remove('active');
+}
+
+addEventListener('blur', () => clearInputs());
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) clearInputs();
+});
+
+function updateTouchBoostVisibility() {
+  if (!touchBoostBtn) return;
+  if (coarsePointer || matchMedia('(pointer: coarse)').matches) {
+    touchBoostBtn.classList.add('visible');
+  } else {
+    // keep a small always-available control on fine pointers too (plan: hidden unless coarse OR always visible small)
+    touchBoostBtn.classList.add('visible');
+    touchBoostBtn.style.width = '56px';
+    touchBoostBtn.style.height = '56px';
+    touchBoostBtn.style.fontSize = '0.85rem';
+    touchBoostBtn.style.opacity = '0.85';
+  }
+}
+updateTouchBoostVisibility();
+
+if (touchBoostBtn) {
+  const setBoost = (on) => {
+    touchBoostHeld = on;
+    touchBoostBtn.classList.toggle('active', on);
+  };
+  touchBoostBtn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    touchBoostBtn.setPointerCapture(e.pointerId);
+    setBoost(true);
+    if (state.phase !== 'playing') requestRestart();
+  });
+  const endBoost = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setBoost(false);
+  };
+  touchBoostBtn.addEventListener('pointerup', endBoost);
+  touchBoostBtn.addEventListener('pointercancel', endBoost);
+  touchBoostBtn.addEventListener('lostpointercapture', () => setBoost(false));
+}
+
 canvas.addEventListener('pointerdown', (e) => {
-  pointerX = e.clientX; pointerY = e.clientY;
-  if (!playing) startGame();
+  if (e.target === touchBoostBtn) return;
+  if (state.phase !== 'playing') {
+    requestRestart();
+    return;
+  }
+  if (pointerSteer.id != null) return;
+  pointerSteer.id = e.pointerId;
+  pointerSteer.originX = e.clientX;
+  pointerSteer.originY = e.clientY;
+  pointerSteer.nx = 0;
+  pointerSteer.ny = 0;
+  try {
+    canvas.setPointerCapture(e.pointerId);
+  } catch {}
 });
+
 canvas.addEventListener('pointermove', (e) => {
-  if (pointerX == null || !playing) return;
-  steer = THREE.MathUtils.clamp(((e.clientX - pointerX) / innerWidth) * 8, -1, 1);
-  steerY = THREE.MathUtils.clamp((-(e.clientY - pointerY) / innerHeight) * 8, -1, 1);
+  if (pointerSteer.id !== e.pointerId) return;
+  const dx = e.clientX - pointerSteer.originX;
+  const dy = e.clientY - pointerSteer.originY;
+  const range = CFG.TOUCH_DRAG_RANGE_PX;
+  const dead = CFG.TOUCH_DEADZONE_PX;
+  const ax = Math.abs(dx) < dead ? 0 : dx;
+  const ay = Math.abs(dy) < dead ? 0 : dy;
+  pointerSteer.nx = THREE.MathUtils.clamp(ax / range, -1, 1);
+  pointerSteer.ny = THREE.MathUtils.clamp(-ay / range, -1, 1);
+  steer = pointerSteer.nx;
+  steerY = pointerSteer.ny;
 });
-canvas.addEventListener('pointerup', () => { pointerX = pointerY = null; steer = steerY = 0; });
+
+function endPointer(e) {
+  if (pointerSteer.id !== e.pointerId) return;
+  clearPointerSteer();
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('lostpointercapture', () => clearPointerSteer());
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -324,59 +915,107 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-new GLTFLoader().load('./rocket.glb', (gltf) => {
-  rocket = gltf.scene;
-  rocket.traverse((c) => { if (c.isMesh) { c.castShadow = false; c.receiveShadow = false; } });
-  rocket.rotation.set(-Math.PI / 2, 0, 0);
-  rocket.scale.setScalar(0.55);
-  rocket.position.set(0, 0, 0);
-  rocket.updateMatrixWorld(true);
-  const bb = new THREE.Box3().setFromObject(rocket);
-  const center = bb.getCenter(new THREE.Vector3());
-  rocket.position.sub(center);
-  rocket.position.y += 0.4;
-  rocket.userData.basePos = rocket.position.clone();
-  rocket.userData.basePitch = -Math.PI / 2;
-  rocketGroup.add(rocket);
-  rocket.getWorldPosition(_prevRocket);
-}, undefined, () => { endMsg.textContent = 'Could not load rocket.glb'; });
+new GLTFLoader().load(
+  './rocket.glb',
+  (gltf) => {
+    rocket = gltf.scene;
+    rocket.traverse((c) => {
+      if (c.isMesh) {
+        c.castShadow = false;
+        c.receiveShadow = false;
+      }
+    });
+    rocket.rotation.set(-Math.PI / 2, 0, 0);
+    rocket.scale.setScalar(0.55);
+    rocket.position.set(0, 0, 0);
+    rocket.updateMatrixWorld(true);
+    const bb = new THREE.Box3().setFromObject(rocket);
+    const center = bb.getCenter(new THREE.Vector3());
+    rocket.position.sub(center);
+    rocket.position.y += 0.4;
+    rocket.userData.basePos = rocket.position.clone();
+    rocket.userData.basePitch = -Math.PI / 2;
+    rocketGroup.add(rocket);
+    rocket.getWorldPosition(_prevRocket);
+  },
+  undefined,
+  () => {
+    endMsg.textContent = 'Could not load rocket.glb';
+  },
+);
 
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
 
-  if (playing && rocket) {
-    timeAlive += dt;
-    const difficulty = Math.min(1, timeAlive / 75);
+  if (state.phase === 'playing' && rocket) {
+    if (document.hidden) {
+      // pause elapsed while tab hidden; inputs already cleared on blur
+      renderer.render(scene, camera);
+      return;
+    }
+
+    state.elapsed += dt;
+
+    // eased speed ramp
+    const t = Math.min(state.elapsed / CFG.RAMP_SECONDS, 1);
+    const eased = t * t * (3 - 2 * t);
+    state.baseSpeed = CFG.BASE_SPEED + (CFG.MAX_BASE_SPEED - CFG.BASE_SPEED) * eased;
 
     // input
-    let inputX = steer;
-    let inputY = steerY;
+    let inputX = pointerSteer.id != null ? pointerSteer.nx : steer;
+    let inputY = pointerSteer.id != null ? pointerSteer.ny : steerY;
     if (keys.has('ArrowLeft') || keys.has('KeyA')) inputX -= 1;
     if (keys.has('ArrowRight') || keys.has('KeyD')) inputX += 1;
     if (keys.has('ArrowUp') || keys.has('KeyW')) inputY += 1;
     if (keys.has('ArrowDown') || keys.has('KeyS')) inputY -= 1;
-    // normalize diagonal
     const mag = Math.hypot(inputX, inputY);
-    if (mag > 1) { inputX /= mag; inputY /= mag; }
-
-    // boost resource
-    const wantBoost = keys.has('Space') && boostFuel > 0.05 && boostCooldown <= 0;
-    if (wantBoost) {
-      boosting = true;
-      boostFuel = Math.max(0, boostFuel - CFG.boostDrain * dt);
-      if (boostFuel <= 0) { boosting = false; boostCooldown = CFG.boostCooldown; }
-    } else {
-      if (boosting) boostCooldown = CFG.boostCooldown;
-      boosting = false;
-      boostCooldown = Math.max(0, boostCooldown - dt);
-      if (boostCooldown <= 0) boostFuel = Math.min(CFG.boostMax, boostFuel + CFG.boostRecharge * dt);
+    if (mag > 1) {
+      inputX /= mag;
+      inputY /= mag;
     }
 
-    const targetSpeed = Math.min(CFG.speedCap, CFG.baseSpeed + timeAlive * CFG.speedRamp + (boosting ? CFG.boostExtra : 0));
-    speed = THREE.MathUtils.damp(speed, targetSpeed, 4, dt);
+    // boost resource
+    const wantBoost =
+      (keys.has('Space') || touchBoostHeld) && state.boostFuel > 0.05 && state.boostCooldown <= 0;
+    if (wantBoost) {
+      state.boosting = true;
+      state.boostFuel = Math.max(0, state.boostFuel - CFG.boostDrain * dt);
+      if (state.boostFuel <= 0) {
+        state.boosting = false;
+        state.boostCooldown = CFG.boostCooldown;
+      }
+    } else {
+      if (state.boosting) state.boostCooldown = CFG.boostCooldown;
+      state.boosting = false;
+      state.boostCooldown = Math.max(0, state.boostCooldown - dt);
+      if (state.boostCooldown <= 0) {
+        state.boostFuel = Math.min(CFG.boostMax, state.boostFuel + CFG.boostRecharge * dt);
+      }
+    }
 
-    // smooth steer accel
+    state.effectiveSpeed = state.baseSpeed + (state.boosting ? CFG.boostExtra : 0);
+    state.distance += state.effectiveSpeed * dt;
+    const nextZone = 1 + Math.floor(state.distance / CFG.ZONE_DISTANCE);
+    if (nextZone !== state.zone) {
+      state.zone = nextZone;
+      beginSectorBlend((state.zone - 1) % CFG.SECTORS.length);
+    }
+    updateSectorVisuals(dt);
+
+    // survival score (fractional accumulator; display uses floors that sum to total)
+    state.survivalAcc += 12 * dt;
+    const survivalFloor = Math.floor(state.survivalAcc);
+    const already = Math.floor(state.scoreParts.survival);
+    if (survivalFloor > already) {
+      awardScore('survival', survivalFloor - already);
+      state.scoreParts.survival = survivalFloor; // keep exact floor in bucket
+    }
+
+    if (state.magnetBoostRemaining > 0) {
+      state.magnetBoostRemaining = Math.max(0, state.magnetBoostRemaining - dt);
+    }
+
     velX = THREE.MathUtils.damp(velX, inputX * CFG.steerMax, CFG.steerAccel, dt);
     velY = THREE.MathUtils.damp(velY, inputY * CFG.steerMax, CFG.steerAccel, dt);
     const baseY = rocket.userData.basePos ? rocket.userData.basePos.y : 0.4;
@@ -387,14 +1026,20 @@ function animate() {
     rocket.rotation.z = THREE.MathUtils.damp(rocket.rotation.z, -inputX * 0.45, 8, dt);
     rocket.rotation.x = THREE.MathUtils.damp(rocket.rotation.x, basePitch - inputY * 0.35, 8, dt);
 
-    if (comboTimer > 0) {
-      comboTimer -= dt;
-      if (comboTimer <= 0) { combo = 1; comboTimer = 0; }
+    if (state.comboTimer > 0) {
+      state.comboTimer -= dt;
+      if (state.comboTimer <= 0) {
+        state.combo = 1;
+        state.comboTimer = 0;
+      }
     }
 
-    const move = speed * dt;
+    const move = state.effectiveSpeed * dt;
     rocket.updateMatrixWorld(true);
     const rocketCenter = new THREE.Box3().setFromObject(rocket).getCenter(new THREE.Vector3());
+
+    const sector = currentSector();
+    const difficulty = Math.min(1, state.elapsed / 75);
 
     for (const a of obstacles) {
       a.position.z += move;
@@ -402,8 +1047,15 @@ function animate() {
       a.rotation.y += a.userData.spin.y * dt;
       if (a.position.z > 10) {
         a.position.z = -70 - Math.random() * 25 - difficulty * 10;
-        a.position.x = (Math.random() * 2 - 1) * CFG.laneHalf;
-        a.position.y = (Math.random() * 2 - 1) * CFG.laneHeight * 0.7;
+        let x = (Math.random() * 2 - 1) * CFG.laneHalf;
+        let y = (Math.random() * 2 - 1) * CFG.laneHeight * 0.7;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          if (positionAvoidsTrail(x, y, a.position.z, 0.9)) break;
+          x = (Math.random() * 2 - 1) * CFG.laneHalf;
+          y = (Math.random() * 2 - 1) * CFG.laneHeight * 0.7;
+        }
+        a.position.x = x;
+        a.position.y = y;
         a.userData.awardedNearMiss = false;
         a.userData.wasAhead = false;
         a.userData.minDist = Infinity;
@@ -417,60 +1069,110 @@ function animate() {
       if (!a.userData.awardedNearMiss && a.userData.wasAhead && a.position.z > rocketCenter.z + 0.6) {
         if ((a.userData.minDist ?? Infinity) < CFG.nearMissDist + a.userData.radius) {
           a.userData.awardedNearMiss = true;
-          const pts = CFG.nearMissValue;
-          nearMissScore += pts;
-          floatScore(pts, '#9ecbff');
+          state.nearMissCount += 1;
+          awardScore('nearMisses', CFG.nearMissValue, { color: '#9ecbff' });
           beep(660, 0.05, 'sine', 0.035);
         }
         a.userData.wasAhead = false;
         a.userData.minDist = Infinity;
       }
 
-      if (rocketHits(a, 0.12)) gameOver();
+      if (rocketHits(a, 0.12)) finishRun();
+    }
+    if (state.phase !== 'playing') {
+      renderer.render(scene, camera);
+      return;
     }
 
+    const magRange = effectiveMagnetRange();
     for (let i = pickups.length - 1; i >= 0; i--) {
       const s = pickups[i];
+      if (s.userData.collected) continue;
       s.position.z += move;
-      s.rotation.z += dt * 2.5;
+      if (s.userData.isCoin) s.rotation.z += dt * 2.5;
+      if (s.userData.isMagnetPickup) {
+        s.rotation.y += dt * 2.2;
+        s.rotation.x = Math.sin(state.elapsed * 3) * 0.25;
+      }
+
       if (s.position.z > 10) {
+        if (s.userData.isMagnetPickup) {
+          s.userData.collected = true;
+          scene.remove(s);
+          pickups.splice(i, 1);
+          continue;
+        }
+        // recycle loose coins as scatter or leave for trail respawn scheduler
         s.position.z = -80 - Math.random() * 40;
         s.position.x = (Math.random() * 2 - 1) * (CFG.laneHalf - 0.6);
         s.position.y = (Math.random() * 2 - 1) * CFG.laneHeight * 0.55;
+        s.userData.collected = false;
       }
 
-      rocket.getWorldPosition(_tmp);
-      const dx = _tmp.x - s.position.x;
-      const dy = _tmp.y - s.position.y;
-      if (Math.hypot(dx, dy) < CFG.magnetRange && s.position.z > CFG.magnetZ[0] && s.position.z < CFG.magnetZ[1]) {
-        s.position.x += Math.sign(dx || 1) * Math.min(Math.abs(dx), 12 * dt);
-        s.position.y += Math.sign(dy || 1) * Math.min(Math.abs(dy), 12 * dt);
-      }
+      if (s.userData.isCoin) {
+        rocket.getWorldPosition(_tmp);
+        const dx = _tmp.x - s.position.x;
+        const dy = _tmp.y - s.position.y;
+        if (Math.hypot(dx, dy) < magRange && s.position.z > CFG.magnetZ[0] && s.position.z < CFG.magnetZ[1]) {
+          const pull = state.magnetBoostRemaining > 0 ? 18 : 12;
+          s.position.x += Math.sign(dx || 1) * Math.min(Math.abs(dx), pull * dt);
+          s.position.y += Math.sign(dy || 1) * Math.min(Math.abs(dy), pull * dt);
+        }
 
-      if (rocketHits(s, 0.7)) {
-        comboTimer = CFG.comboWindow;
-        combo = Math.min(CFG.comboCap, combo + 1);
-        const pts = CFG.coinValue * combo;
-        coinScore += pts;
-        score += pts;
-        floatScore(pts);
-        beep(520 + combo * 40, 0.07, 'square', 0.035);
-        s.position.z = -90 - Math.random() * 40;
-        s.position.x = (Math.random() * 2 - 1) * (CFG.laneHalf - 0.6);
-        s.position.y = (Math.random() * 2 - 1) * CFG.laneHeight * 0.55;
+        if (rocketHits(s, 0.7)) {
+          s.userData.collected = true;
+          state.comboTimer = CFG.comboWindow;
+          state.combo = Math.min(CFG.comboCap, state.combo + 1);
+          state.maxCombo = Math.max(state.maxCombo, state.combo);
+          const mult = state.combo;
+          const pts = CFG.coinValue * mult;
+          awardScore('coins', pts, { multiplier: mult });
+          beep(520 + state.combo * 40, 0.07, 'square', 0.035);
+          // respawn coin further ahead
+          s.userData.collected = false;
+          s.position.z = -90 - Math.random() * 40;
+          s.position.x = (Math.random() * 2 - 1) * (CFG.laneHalf - 0.6);
+          s.position.y = (Math.random() * 2 - 1) * CFG.laneHeight * 0.55;
+        }
+      } else if (s.userData.isMagnetPickup) {
+        if (rocketHits(s, 0.55)) {
+          s.userData.collected = true;
+          state.magnetBoostRemaining = CFG.MAGNET_DURATION; // refresh, no stack
+          beep(880, 0.1, 'triangle', 0.04);
+          scene.remove(s);
+          pickups.splice(i, 1);
+        }
       }
     }
 
-    // occasionally inject denser waves as difficulty rises
-    if (Math.random() < 0.002 + difficulty * 0.004 && obstacles.length < 18) {
+    // spawn scheduler
+    state.trailSpawnTimer += dt;
+    state.magnetPickupTimer += dt;
+    const coinBias = sector.coinWeight;
+    if (state.trailSpawnTimer >= CFG.TRAIL_INTERVAL) {
+      state.trailSpawnTimer = 0;
+      if (Math.random() < coinBias + 0.2) spawnCoinTrail(-75 - Math.random() * 15);
+      else spawnCoinScatter(-75 - Math.random() * 20);
+    }
+    if (state.magnetPickupTimer >= CFG.MAGNET_PICKUP_INTERVAL) {
+      state.magnetPickupTimer = 0;
+      spawnMagnetPickup(-78 - Math.random() * 10);
+    }
+    if (Math.random() < (0.002 + difficulty * 0.004) * (0.7 + sector.asteroidWeight) && obstacles.length < 18) {
       spawnObstacle(-75 - Math.random() * 20);
     }
 
-    score = Math.floor(timeAlive * 12) + coinScore + nearMissScore;
+    // advance / expire trail corridor with world scroll
+    if (state.trailCorridor) {
+      state.trailCorridor.zMin += move;
+      state.trailCorridor.zMax += move;
+      if (state.trailCorridor.zMin > 8) state.trailCorridor = null;
+    }
+
+    latchMissions();
     updateHud();
 
-    // camera + FOV
-    const targetFov = camBase.fov + (boosting ? 8 : 0);
+    const targetFov = camBase.fov + (state.boosting ? 8 : 0);
     camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 5, dt);
     camera.updateProjectionMatrix();
     camera.position.x = THREE.MathUtils.damp(camera.position.x, rocket.position.x * 0.35, 4, dt);
@@ -484,6 +1186,7 @@ function animate() {
 
     rocket.getWorldPosition(_prevRocket);
   } else if (rocket) {
+    updateSectorVisuals(dt);
     const basePitch = rocket.userData.basePitch ?? -Math.PI / 2;
     rocket.rotation.x = basePitch;
     rocket.rotation.z = Math.sin(performance.now() * 0.001) * 0.15;
@@ -492,4 +1195,9 @@ function animate() {
   renderer.render(scene, camera);
 }
 
-animate();
+if (!animStarted) {
+  animStarted = true;
+  // seed HUD stats on load
+  if (completedRunsEl) completedRunsEl.textContent = String(state.stats.completedRuns);
+  animate();
+}
