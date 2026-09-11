@@ -48,6 +48,7 @@ scene.add(rim);
 }
 
 const laneHalf = 4.2;
+const laneHeight = 2.8;
 const rocketGroup = new THREE.Group();
 scene.add(rocketGroup);
 
@@ -56,6 +57,7 @@ let playing = false;
 let score = 0;
 let speed = 14;
 let steer = 0;
+let steerY = 0;
 let boost = 0;
 let timeAlive = 0;
 const keys = new Set();
@@ -101,11 +103,18 @@ function resetWorld() {
   score = 0;
   speed = 14;
   steer = 0;
+  steerY = 0;
   boost = 0;
   timeAlive = 0;
   scoreEl.textContent = '0';
   if (rocket) {
-    rocket.position.set(0, 0.2, 0);
+    if (rocket.userData.basePos) {
+      rocket.position.copy(rocket.userData.basePos);
+      rocket.position.x = 0;
+      rocket.position.y = rocket.userData.basePos.y;
+    } else {
+      rocket.position.set(0, 0.4, 0);
+    }
     rocket.rotation.set(rocket.userData.basePitch ?? -Math.PI / 2, 0, 0);
     rocket.userData.starScore = 0;
   }
@@ -122,22 +131,28 @@ function spawnObstacle(z = -70) {
 
 function spawnPickup(z = -70) {
   const s = makeStar();
-  // Player only steers on X — keep coins on the rocket's flight height.
-  s.position.set((Math.random() * 2 - 1) * (laneHalf - 0.8), 0.35 + Math.random() * 0.35, z);
+  // Full 3D lane: left/right and up/down
+  s.position.set(
+    (Math.random() * 2 - 1) * (laneHalf - 0.6),
+    (Math.random() * 2 - 1) * laneHeight * 0.55,
+    z,
+  );
   s.userData.isCoin = true;
   scene.add(s);
   pickups.push(s);
 }
 
-const _rocketWorld = new THREE.Vector3();
+const _rocketBox = new THREE.Box3();
 const _otherWorld = new THREE.Vector3();
+const _closest = new THREE.Vector3();
 
-function hitTestObjects(rocketObj, other, ra, rb) {
-  rocketObj.getWorldPosition(_rocketWorld);
+function rocketHits(other, pad = 0.25) {
+  // Use the real mesh bounds (root empty ≠ visual center after rotation).
+  _rocketBox.setFromObject(rocket);
+  _rocketBox.expandByScalar(pad);
   other.getWorldPosition(_otherWorld);
-  // Ignore tiny Y wobble; lane game is X/Z.
-  _rocketWorld.y = _otherWorld.y = 0;
-  return _rocketWorld.distanceTo(_otherWorld) < ra + rb;
+  _rocketBox.clampPoint(_otherWorld, _closest);
+  return _closest.distanceTo(_otherWorld) < 0.001;
 }
 
 function gameOver() {
@@ -167,20 +182,24 @@ addEventListener('keydown', (e) => {
 addEventListener('keyup', (e) => keys.delete(e.code));
 
 let pointerX = null;
+let pointerY = null;
 canvas.addEventListener('pointerdown', (e) => {
   pointerX = e.clientX;
+  pointerY = e.clientY;
   if (!playing) startGame();
-  else boost = 1;
 });
 canvas.addEventListener('pointermove', (e) => {
   if (pointerX == null || !playing) return;
   const dx = (e.clientX - pointerX) / innerWidth;
+  const dy = (e.clientY - pointerY) / innerHeight;
   steer = THREE.MathUtils.clamp(dx * 8, -1, 1);
+  steerY = THREE.MathUtils.clamp(-dy * 8, -1, 1); // drag up => fly up
 });
 canvas.addEventListener('pointerup', () => {
   pointerX = null;
+  pointerY = null;
   steer = 0;
-  boost = 0;
+  steerY = 0;
 });
 
 addEventListener('resize', () => {
@@ -204,7 +223,16 @@ loader.load(
     // Tip -90° around X so the nose faces forward into the scene (-Z).
     rocket.rotation.set(-Math.PI / 2, 0, 0);
     rocket.scale.setScalar(0.55);
-    rocket.position.set(0, 0.2, 0);
+    rocket.position.set(0, 0, 0);
+    rocket.updateMatrixWorld(true);
+    {
+      const bb = new THREE.Box3().setFromObject(rocket);
+      const center = bb.getCenter(new THREE.Vector3());
+      // Move whole asset so its bounds center sits on the pivot.
+      rocket.position.sub(center);
+      rocket.position.y += 0.4;
+      rocket.userData.basePos = rocket.position.clone();
+    }
     rocket.userData.basePitch = -Math.PI / 2;
     rocketGroup.add(rocket);
   },
@@ -224,16 +252,27 @@ function animate() {
     speed = 14 + timeAlive * 0.55 + boost * 8;
     if (rocket.userData.starScore == null) rocket.userData.starScore = 0;
 
-    let input = steer;
-    if (keys.has('ArrowLeft') || keys.has('KeyA')) input -= 1;
-    if (keys.has('ArrowRight') || keys.has('KeyD')) input += 1;
-    input = THREE.MathUtils.clamp(input, -1, 1);
-    boost = keys.has('Space') || keys.has('ArrowUp') || keys.has('KeyW') ? 1 : boost * 0.9;
+    let inputX = steer;
+    let inputY = steerY;
+    if (keys.has('ArrowLeft') || keys.has('KeyA')) inputX -= 1;
+    if (keys.has('ArrowRight') || keys.has('KeyD')) inputX += 1;
+    if (keys.has('ArrowUp') || keys.has('KeyW')) inputY += 1;
+    if (keys.has('ArrowDown') || keys.has('KeyS')) inputY -= 1;
+    inputX = THREE.MathUtils.clamp(inputX, -1, 1);
+    inputY = THREE.MathUtils.clamp(inputY, -1, 1);
+    boost = keys.has('Space') ? 1 : 0;
 
-    rocket.position.x = THREE.MathUtils.clamp(rocket.position.x + input * 7 * dt, -laneHalf, laneHalf);
+    const baseY = rocket.userData.basePos ? rocket.userData.basePos.y : 0.4;
+    rocket.position.x = THREE.MathUtils.clamp(rocket.position.x + inputX * 8 * dt, -laneHalf, laneHalf);
+    rocket.position.y = THREE.MathUtils.clamp(rocket.position.y + inputY * 7 * dt, baseY - laneHeight, baseY + laneHeight);
     const basePitch = rocket.userData.basePitch ?? -Math.PI / 2;
-    rocket.rotation.z = THREE.MathUtils.damp(rocket.rotation.z, -input * 0.45, 8, dt);
-    rocket.rotation.x = basePitch + Math.sin(timeAlive * 6) * 0.03 * boost;
+    rocket.rotation.z = THREE.MathUtils.damp(rocket.rotation.z, -inputX * 0.45, 8, dt);
+    rocket.rotation.x = THREE.MathUtils.damp(
+      rocket.rotation.x,
+      basePitch - inputY * 0.35 + Math.sin(timeAlive * 6) * 0.02 * boost,
+      8,
+      dt,
+    );
 
     const move = speed * dt;
     for (const a of obstacles) {
@@ -245,7 +284,7 @@ function animate() {
         a.position.x = (Math.random() * 2 - 1) * laneHalf;
         a.position.y = (Math.random() - 0.2) * 2.2;
       }
-      if (hitTestObjects(rocket, a, 0.7, 0.75)) {
+      if (rocketHits(a, 0.15)) {
         gameOver();
       }
     }
@@ -254,19 +293,26 @@ function animate() {
       s.rotation.y += dt * 2.5;
       if (s.position.z > 8) {
         s.position.z = -80 - Math.random() * 30;
-        s.position.x = (Math.random() * 2 - 1) * (laneHalf - 0.8);
-        s.position.y = 0.35 + Math.random() * 0.35;
+        s.position.x = (Math.random() * 2 - 1) * (laneHalf - 0.6);
+        s.position.y = (Math.random() * 2 - 1) * laneHeight * 0.55;
       }
-      // Soft magnet so coins feel pickable
-      const dx = rocket.position.x - s.position.x;
-      if (Math.abs(dx) < 1.6 && s.position.z > -4 && s.position.z < 3) {
-        s.position.x += Math.sign(dx) * Math.min(Math.abs(dx), 6 * dt);
+      // Soft 3D magnet
+      rocket.getWorldPosition(_otherWorld);
+      const dx = _otherWorld.x - s.position.x;
+      const dy = _otherWorld.y - s.position.y;
+      if (Math.hypot(dx, dy) < 2.4 && s.position.z > -12 && s.position.z < 4) {
+        s.position.x += Math.sign(dx || 1) * Math.min(Math.abs(dx), 10 * dt);
+        s.position.y += Math.sign(dy || 1) * Math.min(Math.abs(dy), 10 * dt);
       }
-      if (hitTestObjects(rocket, s, 0.95, 0.55)) {
+      if (rocketHits(s, 0.65)) {
         rocket.userData.starScore += 25;
+        scoreEl.parentElement.animate(
+          [{ transform: 'scale(1)' }, { transform: 'scale(1.12)' }, { transform: 'scale(1)' }],
+          { duration: 180 },
+        );
         s.position.z = -80 - Math.random() * 40;
-        s.position.x = (Math.random() * 2 - 1) * (laneHalf - 0.8);
-        s.position.y = 0.35 + Math.random() * 0.35;
+        s.position.x = (Math.random() * 2 - 1) * (laneHalf - 0.6);
+        s.position.y = (Math.random() * 2 - 1) * laneHeight * 0.55;
       }
     }
 
@@ -274,7 +320,8 @@ function animate() {
     scoreEl.textContent = String(score);
 
     camera.position.x = THREE.MathUtils.damp(camera.position.x, rocket.position.x * 0.35, 4, dt);
-    camera.lookAt(rocket.position.x * 0.2, 1.2, -4);
+    camera.position.y = THREE.MathUtils.damp(camera.position.y, 3.0 + rocket.position.y * 0.25, 4, dt);
+    camera.lookAt(rocket.position.x * 0.2, rocket.position.y + 0.6, -4);
   } else if (rocket) {
     const basePitch = rocket.userData.basePitch ?? -Math.PI / 2;
     rocket.rotation.x = basePitch;
