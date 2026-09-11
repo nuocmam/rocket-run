@@ -104,7 +104,7 @@ function resetWorld() {
   scoreEl.textContent = '0';
   if (rocket) {
     rocket.position.set(0, 0.2, 0);
-    rocket.rotation.set(0, 0, 0);
+    rocket.rotation.set(rocket.userData.basePitch ?? -Math.PI / 2, 0, 0);
     rocket.userData.starScore = 0;
   }
   for (let i = 0; i < 10; i++) spawnObstacle(-20 - i * 8);
@@ -189,10 +189,12 @@ loader.load(
         c.receiveShadow = false;
       }
     });
-    // Blender rocket was ~Z-up; orient nose forward (-Z) for the flyer
-    rocket.rotation.x = Math.PI / 2;
+    // Blender rocket is Z-up; after glTF Y-up the nose is +Y.
+    // Tip -90° around X so the nose faces forward into the scene (-Z).
+    rocket.rotation.set(-Math.PI / 2, 0, 0);
     rocket.scale.setScalar(0.55);
     rocket.position.set(0, 0.2, 0);
+    rocket.userData.basePitch = -Math.PI / 2;
     rocketGroup.add(rocket);
   },
   undefined,
@@ -218,8 +220,9 @@ function animate() {
     boost = keys.has('Space') || keys.has('ArrowUp') || keys.has('KeyW') ? 1 : boost * 0.9;
 
     rocket.position.x = THREE.MathUtils.clamp(rocket.position.x + input * 7 * dt, -laneHalf, laneHalf);
+    const basePitch = rocket.userData.basePitch ?? -Math.PI / 2;
     rocket.rotation.z = THREE.MathUtils.damp(rocket.rotation.z, -input * 0.45, 8, dt);
-    rocket.rotation.x = Math.PI / 2 + Math.sin(timeAlive * 6) * 0.03 * boost;
+    rocket.rotation.x = basePitch + Math.sin(timeAlive * 6) * 0.03 * boost;
 
     const move = speed * dt;
     for (const a of obstacles) {
@@ -255,7 +258,9 @@ function animate() {
     camera.position.x = THREE.MathUtils.damp(camera.position.x, rocket.position.x * 0.35, 4, dt);
     camera.lookAt(rocket.position.x * 0.2, 1.2, -4);
   } else if (rocket) {
-    rocket.rotation.y += dt * 0.4;
+    const basePitch = rocket.userData.basePitch ?? -Math.PI / 2;
+    rocket.rotation.x = basePitch;
+    rocket.rotation.z = Math.sin(performance.now() * 0.001) * 0.15;
   }
 
   renderer.render(scene, camera);
