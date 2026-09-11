@@ -82,15 +82,17 @@ function makeAsteroid() {
 }
 
 function makeStar() {
-  const geo = new THREE.OctahedronGeometry(0.28, 0);
+  const geo = new THREE.CylinderGeometry(0.38, 0.38, 0.1, 24);
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffd24a,
     emissive: 0xff9a1a,
-    emissiveIntensity: 0.7,
-    metalness: 0.3,
-    roughness: 0.35,
+    emissiveIntensity: 0.85,
+    metalness: 0.75,
+    roughness: 0.25,
   });
-  return new THREE.Mesh(geo, mat);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = Math.PI / 2; // face the camera lane
+  return mesh;
 }
 
 function resetWorld() {
@@ -120,13 +122,22 @@ function spawnObstacle(z = -70) {
 
 function spawnPickup(z = -70) {
   const s = makeStar();
-  s.position.set((Math.random() * 2 - 1) * (laneHalf - 0.6), 0.4 + Math.random() * 1.5, z);
+  // Player only steers on X — keep coins on the rocket's flight height.
+  s.position.set((Math.random() * 2 - 1) * (laneHalf - 0.8), 0.35 + Math.random() * 0.35, z);
+  s.userData.isCoin = true;
   scene.add(s);
   pickups.push(s);
 }
 
-function hitTest(a, b, ra, rb) {
-  return a.distanceTo(b) < ra + rb;
+const _rocketWorld = new THREE.Vector3();
+const _otherWorld = new THREE.Vector3();
+
+function hitTestObjects(rocketObj, other, ra, rb) {
+  rocketObj.getWorldPosition(_rocketWorld);
+  other.getWorldPosition(_otherWorld);
+  // Ignore tiny Y wobble; lane game is X/Z.
+  _rocketWorld.y = _otherWorld.y = 0;
+  return _rocketWorld.distanceTo(_otherWorld) < ra + rb;
 }
 
 function gameOver() {
@@ -234,7 +245,7 @@ function animate() {
         a.position.x = (Math.random() * 2 - 1) * laneHalf;
         a.position.y = (Math.random() - 0.2) * 2.2;
       }
-      if (hitTest(rocket.position, a.position, 0.55, 0.7)) {
+      if (hitTestObjects(rocket, a, 0.7, 0.75)) {
         gameOver();
       }
     }
@@ -243,12 +254,19 @@ function animate() {
       s.rotation.y += dt * 2.5;
       if (s.position.z > 8) {
         s.position.z = -80 - Math.random() * 30;
-        s.position.x = (Math.random() * 2 - 1) * (laneHalf - 0.6);
+        s.position.x = (Math.random() * 2 - 1) * (laneHalf - 0.8);
+        s.position.y = 0.35 + Math.random() * 0.35;
       }
-      if (hitTest(rocket.position, s.position, 0.55, 0.4)) {
+      // Soft magnet so coins feel pickable
+      const dx = rocket.position.x - s.position.x;
+      if (Math.abs(dx) < 1.6 && s.position.z > -4 && s.position.z < 3) {
+        s.position.x += Math.sign(dx) * Math.min(Math.abs(dx), 6 * dt);
+      }
+      if (hitTestObjects(rocket, s, 0.95, 0.55)) {
         rocket.userData.starScore += 25;
         s.position.z = -80 - Math.random() * 40;
-        s.position.x = (Math.random() * 2 - 1) * (laneHalf - 0.6);
+        s.position.x = (Math.random() * 2 - 1) * (laneHalf - 0.8);
+        s.position.y = 0.35 + Math.random() * 0.35;
       }
     }
 
